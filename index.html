@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Growth | AI 大学生个性化职业成长训练师</title>
+  <meta name="description" content="Growth 竞赛版 MVP：课表驱动的职业成长规划、技能差距分析、三层学习路径、资源策展与进度回访。">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="ambient ambient-left"></div>
+  <div class="ambient ambient-right"></div>
+
+  <header class="hero shell">
+    <div class="hero-copy">
+      <p class="eyebrow">AI + 求职 · Competition MVP</p>
+      <h1>Growth</h1>
+      <p class="hero-subtitle">从课表到 Offer 的 AI 全链路成长规划平台</p>
+      <p class="hero-description">
+        这是一版按 PDF 需求直接落地的竞赛型 Web Demo。它把「课表约束、技能差距、年/月/周规划、
+        资源推荐、周回访调整」串成了一条可交互、可讲故事、可本地演示的完整闭环。
+      </p>
+
+      <div class="hero-actions">
+        <button class="primary-btn" id="heroGenerateBtn">一键生成 Growth 方案</button>
+        <a class="secondary-link" href="#plannerSection">查看学习路径</a>
+      </div>
+
+      <div class="hero-metrics">
+        <div class="metric-chip">
+          <span class="metric-value" id="heroHours">0h</span>
+          <span class="metric-label">每周学习预算</span>
+        </div>
+        <div class="metric-chip">
+          <span class="metric-value" id="heroFit">0%</span>
+          <span class="metric-label">岗位匹配度</span>
+        </div>
+        <div class="metric-chip">
+          <span class="metric-value" id="heroGaps">0</span>
+          <span class="metric-label">高优先级差距</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="hero-card glass-card">
+      <div class="hero-card-top">
+        <span class="status-dot"></span>
+        <span>LangGraph 思路版 Orchestrator</span>
+      </div>
+      <div class="orchestrator-list">
+        <article>
+          <strong>Profile Builder</strong>
+          <p>课表空档计算、经历解析、成长画像构建</p>
+        </article>
+        <article>
+          <strong>Target Analyst</strong>
+          <p>岗位技能树检索、加权差距排序</p>
+        </article>
+        <article>
+          <strong>Learning Path Planner</strong>
+          <p>年/月/周三层规划 + 复习节点插入</p>
+        </article>
+        <article>
+          <strong>Resource Curator</strong>
+          <p>多平台资源排序 + 推荐理由生成</p>
+        </article>
+        <article>
+          <strong>Progress Coach</strong>
+          <p>周日回访、进度诊断、计划动态调整</p>
+        </article>
+      </div>
+    </div>
+  </header>
+
+  <main class="shell app-layout">
+    <aside class="control-column">
+      <section class="glass-card panel">
+        <div class="panel-heading">
+          <p class="eyebrow">Step 1</p>
+          <h2>输入工作台</h2>
+          <p>先选择一个人物预设，或者直接修改字段和课表。</p>
+        </div>
+
+        <div class="preset-row" id="presetRow"></div>
+
+        <form id="profileForm" class="profile-form">
+          <div class="field-grid">
+            <label class="field">
+              <span>姓名</span>
+              <input id="studentName" name="studentName" type="text" placeholder="例如：张同学">
+            </label>
+
+            <label class="field">
+              <span>年级</span>
+              <select id="studentGrade" name="studentGrade">
+                <option value="大一">大一</option>
+                <option value="大二">大二</option>
+                <option value="大三" selected>大三</option>
+                <option value="大四">大四</option>
+                <option value="研一">研一</option>
+                <option value="研二">研二</option>
+                <option value="研三">研三</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>专业</span>
+              <input id="studentMajor" name="studentMajor" type="text" placeholder="例如：计算机科学与技术">
+            </label>
+
+            <label class="field">
+              <span>目标岗位</span>
+              <select id="targetRole" name="targetRole"></select>
+            </label>
+          </div>
+
+          <div class="field-grid">
+            <label class="field field-wide">
+              <span>目标说明</span>
+              <textarea id="goalText" name="goalText" rows="3" placeholder="例如：希望在明年春招前拿到 2 个 Java 后端面试机会"></textarea>
+            </label>
+          </div>
+
+          <div class="slider-grid">
+            <label class="field">
+              <span>距离目标窗口</span>
+              <div class="range-wrap">
+                <input id="deadlineMonths" name="deadlineMonths" type="range" min="3" max="12" value="5">
+                <strong id="deadlineValue">5 个月</strong>
+              </div>
+            </label>
+
+            <label class="field">
+              <span>当前精力稳定度</span>
+              <div class="range-wrap">
+                <input id="energyLevel" name="energyLevel" type="range" min="1" max="5" value="4">
+                <strong id="energyValue">4 / 5</strong>
+              </div>
+            </label>
+          </div>
+
+          <label class="toggle-row">
+            <input id="examWeek" name="examWeek" type="checkbox">
+            <span>近期包含考试周，自动减轻周计划负荷</span>
+          </label>
+
+          <div class="upload-hint">
+            <span class="upload-pill">Demo 模式</span>
+            <p>竞赛现场可将这里替换成课表 OCR / 简历解析接口；当前版本用可编辑课表与经历标签模拟完整流程。</p>
+          </div>
+
+          <section class="sub-panel">
+            <div class="sub-panel-head">
+              <h3>课表空档矩阵</h3>
+              <p>单击切换：忙碌 → 可学习 → 高专注。</p>
+            </div>
+            <div id="timetableBoard" class="timetable-board"></div>
+            <div class="budget-summary" id="budgetSummary"></div>
+          </section>
+
+          <section class="sub-panel">
+            <div class="sub-panel-head">
+              <h3>经历与隐性能力</h3>
+              <p>模拟 PDF 中「多轮追问挖掘简历以外经历」的效果。</p>
+            </div>
+            <div id="experienceTags" class="tag-grid"></div>
+          </section>
+
+          <section class="sub-panel">
+            <div class="sub-panel-head">
+              <h3>简历 / 自我描述文本</h3>
+              <p>系统会从关键词里估算你的当前技能底座。</p>
+            </div>
+            <textarea id="resumeText" name="resumeText" rows="7" placeholder="可以贴项目经历、课程经历、社团经验、竞赛经历等"></textarea>
+          </section>
+
+          <button class="primary-btn full-width" type="submit">刷新画像与成长路径</button>
+        </form>
+      </section>
+
+      <section class="glass-card panel algorithm-panel">
+        <div class="panel-heading">
+          <p class="eyebrow">Step 2</p>
+          <h2>算法引擎</h2>
+        </div>
+        <div id="algorithmList" class="algorithm-list"></div>
+      </section>
+    </aside>
+
+    <section class="content-column">
+      <section class="glass-card panel" id="dashboardSection">
+        <div class="panel-heading">
+          <p class="eyebrow">Step 3</p>
+          <h2>成长画像总览</h2>
+          <p>系统先把时间预算、技能底座和岗位匹配度建模出来。</p>
+        </div>
+        <div class="stats-grid" id="dashboardStats"></div>
+        <div class="profile-grid">
+          <article class="visual-card">
+            <div class="card-title-row">
+              <h3>技能雷达</h3>
+              <span class="mini-note">当前能力 vs 目标岗位标准</span>
+            </div>
+            <div id="radarChart" class="radar-chart"></div>
+          </article>
+
+          <article class="summary-card">
+            <div class="card-title-row">
+              <h3>画像摘要</h3>
+              <span class="mini-note">Profile Builder 输出</span>
+            </div>
+            <div id="profileSummary" class="summary-list"></div>
+            <div id="strengthTags" class="strength-tags"></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="glass-card panel" id="gapSection">
+        <div class="panel-heading">
+          <p class="eyebrow">Step 4</p>
+          <h2>目标岗位技能树与差距分析</h2>
+          <p>按「重要性 × 差距程度 × 难度修正 × 依赖缺口」排序，直接告诉用户最该补哪一块。</p>
+        </div>
+        <div class="gap-overview" id="gapOverview"></div>
+        <div id="gapList" class="gap-list"></div>
+      </section>
+
+      <section class="glass-card panel" id="plannerSection">
+        <div class="panel-heading">
+          <p class="eyebrow">Step 5</p>
+          <h2>年 / 月 / 周三层学习路径</h2>
+          <p>Learning Path Planner 会同时考虑技能优先级、时间预算、里程碑和复习节点。</p>
+        </div>
+        <div id="annualRoadmap" class="annual-roadmap"></div>
+        <div id="monthlyPlan" class="monthly-plan"></div>
+        <div class="card-title-row schedule-head">
+          <h3>首周落地课表</h3>
+          <span class="mini-note">含艾宾浩斯复习节点与弹性缓冲位</span>
+        </div>
+        <div id="weeklySchedule" class="weekly-schedule"></div>
+      </section>
+
+      <section class="glass-card panel" id="resourcesSection">
+        <div class="panel-heading">
+          <p class="eyebrow">Step 6</p>
+          <h2>全网学习资源智能策展</h2>
+          <p>按内容匹配度、难度适配度、时长适配度、平台质量和上手成本进行多维排序。</p>
+        </div>
+        <div id="resourceBoard" class="resource-board"></div>
+      </section>
+
+      <section class="glass-card panel" id="coachSection">
+        <div class="panel-heading">
+          <p class="eyebrow">Step 7</p>
+          <h2>周日回访与动态调整</h2>
+          <p>模拟 Progress Coach 每周回访后的调整建议。</p>
+        </div>
+
+        <div class="coach-controls">
+          <label class="field">
+            <span>本周完成度</span>
+            <div class="range-wrap">
+              <input id="completionRate" type="range" min="20" max="100" value="72">
+              <strong id="completionValue">72%</strong>
+            </div>
+          </label>
+
+          <label class="field">
+            <span>学习阻力</span>
+            <div class="range-wrap">
+              <input id="difficultyRate" type="range" min="10" max="100" value="44">
+              <strong id="difficultyValue">44 / 100</strong>
+            </div>
+          </label>
+
+          <label class="field">
+            <span>自信度</span>
+            <div class="range-wrap">
+              <input id="confidenceRate" type="range" min="10" max="100" value="68">
+              <strong id="confidenceValue">68 / 100</strong>
+            </div>
+          </label>
+        </div>
+
+        <div class="coach-grid">
+          <article class="summary-card">
+            <div class="card-title-row">
+              <h3>调整建议</h3>
+              <span class="mini-note">Adjusted Plan</span>
+            </div>
+            <div id="coachSummary" class="summary-list"></div>
+          </article>
+          <article class="visual-card">
+            <div class="card-title-row">
+              <h3>成长趋势预测</h3>
+              <span class="mini-note">未来 4 周技能匹配度</span>
+            </div>
+            <div id="coachTrend" class="trend-chart"></div>
+          </article>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
