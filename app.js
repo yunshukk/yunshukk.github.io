@@ -3,14 +3,26 @@
     DAYS,
     PERIODS,
     SLOT_STATES,
-    ROLE_TREES,
+    DISCIPLINES,
+    GRADE_OPTIONS,
+    CAREER_SUGGESTIONS,
     EXPERIENCE_TAGS,
     PRESETS,
-    RESOURCES,
+    AI_KEYWORD_LIBRARY,
+    CAREER_TEMPLATE_LIBRARY,
+    RESOURCE_LIBRARY,
     ALGORITHM_NOTES
   } = window.GrowthData;
 
+  const DB_NAME = "growth-ai-studio-db";
+  const DB_VERSION = 1;
+  const USER_STORE = "users";
+  const PLAN_STORE = "plans";
+
   const state = {
+    db: null,
+    authMode: "login",
+    currentUser: null,
     activePreset: "java_sprint",
     schedule: clone(PRESETS.java_sprint.schedule),
     selectedTags: new Set(PRESETS.java_sprint.selectedTags),
@@ -18,13 +30,34 @@
     gapReport: [],
     plan: null,
     resources: [],
-    coach: null
+    coach: null,
+    history: [],
+    lastAiTrace: []
   };
 
   const els = {
+    authGate: document.getElementById("authGate"),
+    appRoot: document.getElementById("appRoot"),
+    authForm: document.getElementById("authForm"),
+    authTabs: document.querySelectorAll("[data-auth-mode]"),
+    authDisplayNameField: document.getElementById("authDisplayNameField"),
+    authDisplayName: document.getElementById("authDisplayName"),
+    authUsername: document.getElementById("authUsername"),
+    authPassword: document.getElementById("authPassword"),
+    authSubmitBtn: document.getElementById("authSubmitBtn"),
+    demoLoginBtn: document.getElementById("demoLoginBtn"),
+    currentUserBadge: document.getElementById("currentUserBadge"),
+    logoutBtn: document.getElementById("logoutBtn"),
+    saveVersionBtn: document.getElementById("saveVersionBtn"),
+    newPlanBtn: document.getElementById("newPlanBtn"),
+    workspaceSummary: document.getElementById("workspaceSummary"),
+    historyList: document.getElementById("historyList"),
     presetRow: document.getElementById("presetRow"),
+    studentGrade: document.getElementById("studentGrade"),
+    studentDiscipline: document.getElementById("studentDiscipline"),
+    majorSuggestionList: document.getElementById("majorSuggestionList"),
+    careerSuggestionGrid: document.getElementById("careerSuggestionGrid"),
     profileForm: document.getElementById("profileForm"),
-    targetRole: document.getElementById("targetRole"),
     deadlineMonths: document.getElementById("deadlineMonths"),
     deadlineValue: document.getElementById("deadlineValue"),
     energyLevel: document.getElementById("energyLevel"),
@@ -55,23 +88,97 @@
     heroGenerateBtn: document.getElementById("heroGenerateBtn"),
     heroHours: document.getElementById("heroHours"),
     heroFit: document.getElementById("heroFit"),
-    heroGaps: document.getElementById("heroGaps")
+    heroGaps: document.getElementById("heroGaps"),
+    aiConsole: document.getElementById("aiConsole"),
+    toast: document.getElementById("toast")
   };
 
-  init();
+  bootstrap();
 
-  function init() {
-    populateTargetRoles();
-    renderPresetButtons();
+  async function bootstrap() {
     renderAlgorithmNotes();
-    bindEvents();
-    applyPreset(state.activePreset);
+    populateGradeOptions();
+    populateDisciplineOptions();
+    renderCareerSuggestions();
+    renderPresetButtons();
+    bindGlobalEvents();
+    try {
+      state.db = await openDatabase();
+      await ensureDemoAccount();
+      const rememberedUser = localStorage.getItem("growth-current-user");
+      if (rememberedUser) {
+        const user = await getUserByUsername(rememberedUser);
+        if (user) {
+          state.currentUser = user;
+          await enterApp();
+          return;
+        }
+      }
+      renderAuthMode();
+    } catch (error) {
+      console.error(error);
+      showToast("初始化数据库失败，请刷新页面重试");
+    }
   }
 
-  function bindEvents() {
-    els.profileForm.addEventListener("submit", (event) => {
+  function bindGlobalEvents() {
+    els.authTabs.forEach((button) => {
+      button.addEventListener("click", () => {
+        state.authMode = button.dataset.authMode;
+        renderAuthMode();
+      });
+    });
+
+    els.authForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (state.authMode === "register") {
+        await registerUser();
+      } else {
+        await loginUser();
+      }
+    });
+
+    els.demoLoginBtn.addEventListener("click", async () => {
+      const demoUser = await getUserByUsername("demo");
+      if (!demoUser) {
+        showToast("演示账号不存在，请刷新后重试");
+        return;
+      }
+      state.currentUser = demoUser;
+      await enterApp();
+      showToast("已进入演示账号");
+    });
+
+    els.logoutBtn.addEventListener("click", () => {
+      localStorage.removeItem("growth-current-user");
+      state.currentUser = null;
+      state.history = [];
+      els.appRoot.hidden = true;
+      els.authGate.hidden = false;
+      renderAuthMode();
+    });
+
+    els.saveVersionBtn.addEventListener("click", async () => {
+      if (!state.currentUser || !state.plan || !state.profile) {
+        showToast("先生成一套方案，再保存版本");
+        return;
+      }
+      await saveCurrentPlan("手动保存");
+    });
+
+    els.newPlanBtn.addEventListener("click", () => {
+      applyPreset(state.activePreset);
+      showToast("已基于当前预设重置为新方案草稿");
+    });
+
+    els.profileForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       refreshPlan();
+      await saveDraftPlan();
+    });
+
+    els.studentDiscipline.addEventListener("change", () => {
+      populateMajorSuggestions();
     });
 
     els.deadlineMonths.addEventListener("input", () => {
@@ -82,11 +189,6 @@
       els.energyValue.textContent = `${els.energyLevel.value} / 5`;
     });
 
-    els.targetRole.addEventListener("change", () => {
-      renderExperienceTags();
-      refreshPlan(false);
-    });
-
     els.examWeek.addEventListener("change", () => {
       renderBudgetSummary();
       refreshPlan(false);
@@ -95,17 +197,118 @@
     els.completionRate.addEventListener("input", updateCoachFromInputs);
     els.difficultyRate.addEventListener("input", updateCoachFromInputs);
     els.confidenceRate.addEventListener("input", updateCoachFromInputs);
+
     els.heroGenerateBtn.addEventListener("click", () => {
-      document.getElementById("profileForm").scrollIntoView({ behavior: "smooth", block: "start" });
+      document.getElementById("plannerSection").scrollIntoView({ behavior: "smooth", block: "start" });
       refreshPlan();
     });
   }
 
-  function populateTargetRoles() {
-    const html = Object.entries(ROLE_TREES)
-      .map(([id, role]) => `<option value="${id}">${role.label}</option>`)
+  function renderAuthMode() {
+    els.authTabs.forEach((button) => {
+      button.classList.toggle("is-active", button.dataset.authMode === state.authMode);
+    });
+    const isRegister = state.authMode === "register";
+    els.authDisplayNameField.hidden = !isRegister;
+    els.authSubmitBtn.textContent = isRegister ? "创建我的 Growth 空间" : "进入我的 Growth 空间";
+  }
+
+  async function registerUser() {
+    const username = els.authUsername.value.trim().toLowerCase();
+    const password = els.authPassword.value.trim();
+    const displayName = els.authDisplayName.value.trim() || username;
+    if (!username || !password) {
+      showToast("请先填写用户名和密码");
+      return;
+    }
+    const existing = await getUserByUsername(username);
+    if (existing) {
+      showToast("这个用户名已经存在，请换一个");
+      return;
+    }
+    const user = {
+      username,
+      password,
+      displayName,
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+    await putRecord(USER_STORE, user);
+    state.currentUser = user;
+    await enterApp();
+    showToast("注册成功，已进入你的专属空间");
+  }
+
+  async function loginUser() {
+    const username = els.authUsername.value.trim().toLowerCase();
+    const password = els.authPassword.value.trim();
+    const user = await getUserByUsername(username);
+    if (!user || user.password !== password) {
+      showToast("用户名或密码不正确");
+      return;
+    }
+    state.currentUser = user;
+    await enterApp();
+    showToast("登录成功");
+  }
+
+  async function enterApp() {
+    localStorage.setItem("growth-current-user", state.currentUser.username);
+    els.authGate.hidden = true;
+    els.appRoot.hidden = false;
+    els.currentUserBadge.textContent = `${state.currentUser.displayName} · 本地数据库已连接`;
+    renderPresetButtons();
+    renderTimetable();
+    renderExperienceTags();
+    renderWorkspaceSummary();
+    await loadUserHistory();
+    await loadLatestDraftOrPreset();
+  }
+
+  async function ensureDemoAccount() {
+    const demoUser = await getUserByUsername("demo");
+    if (demoUser) {
+      return;
+    }
+    await putRecord(USER_STORE, {
+      username: "demo",
+      password: "demo123",
+      displayName: "Growth 演示账号",
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    });
+  }
+
+  function populateGradeOptions() {
+    els.studentGrade.innerHTML = GRADE_OPTIONS
+      .map((grade) => `<option value="${grade}">${grade}</option>`)
       .join("");
-    els.targetRole.innerHTML = html;
+  }
+
+  function populateDisciplineOptions() {
+    els.studentDiscipline.innerHTML = DISCIPLINES
+      .map((discipline) => `<option value="${discipline.id}">${discipline.label}</option>`)
+      .join("");
+    populateMajorSuggestions();
+  }
+
+  function populateMajorSuggestions() {
+    const selectedDiscipline = DISCIPLINES.find((item) => item.id === els.studentDiscipline.value) || DISCIPLINES[0];
+    els.majorSuggestionList.innerHTML = selectedDiscipline.majors
+      .map((major) => `<option value="${major}"></option>`)
+      .join("");
+  }
+
+  function renderCareerSuggestions() {
+    els.careerSuggestionGrid.innerHTML = CAREER_SUGGESTIONS
+      .map((career) => `<button type="button" class="tag-chip career-chip" data-career="${career}">${career}</button>`)
+      .join("");
+    els.careerSuggestionGrid.querySelectorAll("[data-career]").forEach((button) => {
+      button.addEventListener("click", () => {
+        document.getElementById("careerTarget").value = button.dataset.career;
+        refreshPlan(false);
+      });
+    });
   }
 
   function renderPresetButtons() {
@@ -123,35 +326,23 @@
     });
   }
 
-  function renderAlgorithmNotes() {
-    els.algorithmList.innerHTML = ALGORITHM_NOTES.map((item) => `
-      <article>
-        <h3>${item.title}</h3>
-        <p>${item.summary}</p>
-        <ul>${item.bullets.map((bullet) => `<li>${bullet}</li>`).join("")}</ul>
-      </article>
-    `).join("");
-  }
-
   function applyPreset(presetId) {
     state.activePreset = presetId;
     const preset = PRESETS[presetId];
-
-    setInputValue("studentName", preset.fields.studentName);
-    setInputValue("studentGrade", preset.fields.studentGrade);
-    setInputValue("studentMajor", preset.fields.studentMajor);
-    setInputValue("targetRole", preset.fields.targetRole);
-    setInputValue("goalText", preset.fields.goalText);
-    setInputValue("deadlineMonths", preset.fields.deadlineMonths);
-    setInputValue("energyLevel", preset.fields.energyLevel);
-    setInputValue("resumeText", preset.fields.resumeText);
-    els.examWeek.checked = preset.fields.examWeek;
-    els.deadlineValue.textContent = `${preset.fields.deadlineMonths} 个月`;
-    els.energyValue.textContent = `${preset.fields.energyLevel} / 5`;
-
+    Object.entries(preset.fields).forEach(([key, value]) => {
+      const input = document.getElementById(key);
+      if (!input) return;
+      if (input.type === "checkbox") {
+        input.checked = Boolean(value);
+      } else {
+        input.value = value;
+      }
+    });
     state.schedule = clone(preset.schedule);
     state.selectedTags = new Set(preset.selectedTags);
-
+    populateMajorSuggestions();
+    els.deadlineValue.textContent = `${preset.fields.deadlineMonths} 个月`;
+    els.energyValue.textContent = `${preset.fields.energyLevel} / 5`;
     renderPresetButtons();
     renderTimetable();
     renderExperienceTags();
@@ -165,14 +356,12 @@
         ${DAYS.map((day) => `<span>${day}</span>`).join("")}
       </div>
     `;
-
     const rows = PERIODS.map((period, periodIndex) => `
       <div class="timetable-row">
         <div class="period-label">${period.label}<br><small>${period.time}</small></div>
         ${DAYS.map((_, dayIndex) => renderSlotButton(dayIndex, periodIndex)).join("")}
       </div>
     `).join("");
-
     els.timetableBoard.innerHTML = header + rows;
     els.timetableBoard.querySelectorAll("[data-slot]").forEach((button) => {
       button.addEventListener("click", () => {
@@ -183,7 +372,6 @@
         refreshPlan(false);
       });
     });
-
     renderBudgetSummary();
   }
 
@@ -198,8 +386,8 @@
   }
 
   function cycleScheduleState(dayIndex, periodIndex) {
-    const current = state.schedule[dayIndex][periodIndex];
     const order = ["blocked", "study", "focus"];
+    const current = state.schedule[dayIndex][periodIndex];
     const next = order[(order.indexOf(current) + 1) % order.length];
     state.schedule[dayIndex][periodIndex] = next;
   }
@@ -209,24 +397,17 @@
     els.budgetSummary.innerHTML = `
       <span class="summary-pill">每周可用 ${scheduleStats.weeklyHours.toFixed(1)} h</span>
       <span class="summary-pill">高专注 ${scheduleStats.focusHours.toFixed(1)} h</span>
-      <span class="summary-pill">空档槽位 ${scheduleStats.availableSlots.length} 个</span>
+      <span class="summary-pill">可用时段 ${scheduleStats.availableSlots.length} 个</span>
       <span class="summary-pill">考试周系数 ${scheduleStats.examLoadFactor.toFixed(2)}</span>
     `;
   }
 
   function renderExperienceTags() {
-    const roleId = els.targetRole.value || PRESETS[state.activePreset].fields.targetRole;
-    const role = ROLE_TREES[roleId];
-    els.experienceTags.innerHTML = EXPERIENCE_TAGS.map((tag) => {
-      const selected = state.selectedTags.has(tag.id);
-      const affinity = Object.keys(tag.bonuses).some((skillId) => role.skills.some((skill) => skill.id === skillId));
-      return `
-        <button class="tag-chip ${selected ? "is-selected" : ""}" type="button" data-tag="${tag.id}">
-          ${tag.label}${affinity ? " · 高相关" : ""}
-        </button>
-      `;
-    }).join("");
-
+    els.experienceTags.innerHTML = EXPERIENCE_TAGS.map((tag) => `
+      <button class="tag-chip ${state.selectedTags.has(tag.id) ? "is-selected" : ""}" type="button" data-tag="${tag.id}">
+        ${tag.label}
+      </button>
+    `).join("");
     els.experienceTags.querySelectorAll("[data-tag]").forEach((button) => {
       button.addEventListener("click", () => {
         const tagId = button.dataset.tag;
@@ -241,61 +422,124 @@
     });
   }
 
-  function refreshPlan(scrollToSection = false) {
-    const formData = readFormData();
-    const roleTree = ROLE_TREES[formData.targetRole];
-    const profile = buildProfile(formData, roleTree);
-    const gapReport = buildGapReport(profile.skillScores, roleTree);
-    const plan = buildLearningPlan(formData, profile, roleTree, gapReport);
-    const resources = buildResourcePlan(formData, roleTree, gapReport, plan);
+  function renderAlgorithmNotes() {
+    els.algorithmList.innerHTML = ALGORITHM_NOTES.map((item) => `
+      <article>
+        <h3>${item.title}</h3>
+        <p>${item.summary}</p>
+        <ul>${item.bullets.map((bullet) => `<li>${bullet}</li>`).join("")}</ul>
+      </article>
+    `).join("");
+  }
 
+  function refreshPlan(scrollToDashboard = false) {
+    const formData = readFormData();
+    const aiRole = buildDynamicCareerBlueprint(formData);
+    const profile = buildProfile(formData, aiRole);
+    const gapReport = buildGapReport(profile.skillScores, aiRole);
+    const plan = buildLearningPlan(formData, profile, aiRole, gapReport);
+    const resources = buildResourcePlan(aiRole, gapReport, plan);
     state.profile = profile;
     state.gapReport = gapReport;
     state.plan = plan;
     state.resources = resources;
-
-    renderDashboard(formData, profile, gapReport);
-    renderGapAnalysis(roleTree, gapReport);
+    state.lastAiTrace = aiRole.trace;
+    renderAIConsole(aiRole.trace);
+    renderWorkspaceSummary();
+    renderDashboard(formData, aiRole, profile, gapReport);
+    renderGapAnalysis(aiRole, gapReport);
     renderPlanner(plan);
     renderResources(resources);
     updateCoachFromInputs();
-
-    if (scrollToSection) {
+    if (scrollToDashboard) {
       document.getElementById("dashboardSection").scrollIntoView({ behavior: "smooth", block: "start" });
     }
   }
 
   function readFormData() {
     return {
-      studentName: getInputValue("studentName"),
-      studentGrade: getInputValue("studentGrade"),
-      studentMajor: getInputValue("studentMajor"),
-      targetRole: getInputValue("targetRole"),
-      goalText: getInputValue("goalText"),
-      deadlineMonths: Number(getInputValue("deadlineMonths")),
-      energyLevel: Number(getInputValue("energyLevel")),
+      studentName: document.getElementById("studentName").value.trim(),
+      studentGrade: els.studentGrade.value,
+      studentDiscipline: els.studentDiscipline.value,
+      studentMajor: document.getElementById("studentMajor").value.trim(),
+      careerTarget: document.getElementById("careerTarget").value.trim(),
+      careerPrompt: document.getElementById("careerPrompt").value.trim(),
+      goalText: document.getElementById("goalText").value.trim(),
+      deadlineMonths: Number(els.deadlineMonths.value),
+      energyLevel: Number(els.energyLevel.value),
       examWeek: els.examWeek.checked,
-      resumeText: getInputValue("resumeText"),
+      resumeText: document.getElementById("resumeText").value.trim(),
       selectedTags: Array.from(state.selectedTags),
       schedule: clone(state.schedule)
     };
   }
 
-  function buildProfile(formData, roleTree) {
+  function buildDynamicCareerBlueprint(formData) {
+    const text = `${formData.careerTarget} ${formData.careerPrompt} ${formData.goalText}`.toLowerCase();
+    const discipline = DISCIPLINES.find((item) => item.id === formData.studentDiscipline);
+    const matched = AI_KEYWORD_LIBRARY.find((item) => item.pattern.test(text)) || AI_KEYWORD_LIBRARY.find((item) => item.track === "analysis");
+    const template = CAREER_TEMPLATE_LIBRARY[matched.track];
+    const roleLabel = formData.careerTarget || "自定义职业目标";
+    const majorBias = inferMajorBias(formData.studentMajor, formData.studentDiscipline);
+
+    const skills = template.skillPool.map((skill, index) => ({
+      ...skill,
+      target: clamp(skill.target + majorBias.targetDelta + (index === 0 ? 0 : formData.deadlineMonths < 5 ? 2 : 0), 70, 95)
+    }));
+
+    const trace = [
+      `识别目标职业：${roleLabel}`,
+      `AI 判断职业轨道：${matched.blueprint}`,
+      `识别用户学科：${discipline ? discipline.label : "未分类"} · 专业：${formData.studentMajor || "未填写"}`,
+      `核心优势推断：${majorBias.summary}`,
+      `计划策略：${formData.deadlineMonths <= 5 ? "短周期冲刺型" : "稳步成长型"} · ${formData.examWeek ? "考试周减负已开启" : "常规节奏"}`
+    ];
+
+    return {
+      id: slugify(roleLabel) || "custom-career",
+      label: roleLabel,
+      track: matched.track,
+      blueprint: matched.blueprint,
+      majorBias,
+      strengths: template.strengths,
+      skills,
+      trace
+    };
+  }
+
+  function inferMajorBias(major, disciplineId) {
+    const text = `${major} ${disciplineId}`.toLowerCase();
+    if (/(计算机|软件|人工智能|数据|统计|数学)/.test(text)) {
+      return { targetDelta: 0, scoreBoosts: { technical: 14, analytical: 12, project: 6 }, summary: "理工与数据基础较强，适合快速建立工具能力和结构化分析能力" };
+    }
+    if (/(法学|新闻|汉语言|社会|政治|历史|哲学|公共管理)/.test(text)) {
+      return { targetDelta: 1, scoreBoosts: { communication: 14, research: 12, writing: 12 }, summary: "写作、调研与表达优势明显，适合走研究、产品、公共事务与教育方向" };
+    }
+    if (/(市场|管理|金融|经济|会计|商务)/.test(text)) {
+      return { targetDelta: 0, scoreBoosts: { business: 14, analytical: 8, execution: 10 }, summary: "商业理解和执行意识较强，适合运营、品牌、咨询与分析方向" };
+    }
+    if (/(艺术|设计|动画|视觉|数字媒体)/.test(text)) {
+      return { targetDelta: 2, scoreBoosts: { creativity: 16, branding: 10, project: 6 }, summary: "创意表达和视觉能力有天然优势，适合设计、品牌、内容与产品方向" };
+    }
+    if (/(医学|护理|药学|临床|健康)/.test(text)) {
+      return { targetDelta: 2, scoreBoosts: { domain: 16, service: 12, research: 8 }, summary: "专业领域认知深，适合医疗、健康、医药与跨界分析方向" };
+    }
+    return { targetDelta: 0, scoreBoosts: { learning: 8, communication: 6, execution: 6 }, summary: "具备可迁移潜力，适合通过项目和作品把能力显性化" };
+  }
+
+  function buildProfile(formData, aiRole) {
     const scheduleStats = computeScheduleStats(formData.schedule, formData.examWeek);
-    const skillScores = inferSkillScores(formData, roleTree, scheduleStats);
-    const roleFit = computeRoleFit(skillScores, roleTree);
+    const skillScores = inferSkillScores(formData, aiRole, scheduleStats);
+    const roleFit = computeRoleFit(skillScores, aiRole.skills);
     const strengths = sortEntries(skillScores)
       .slice(0, 4)
       .map(([skillId, score]) => ({
         skillId,
         score,
-        label: roleTree.skills.find((skill) => skill.id === skillId).name
+        label: aiRole.skills.find((skill) => skill.id === skillId).name
       }));
-
-    const latentStrengths = deriveLatentStrengths(formData, roleTree);
-    const disciplineIndex = clamp(Math.round((scheduleStats.focusHours * 3.1 + formData.energyLevel * 8 + scheduleStats.availableSlots.length * 1.4)), 35, 96);
-
+    const latentStrengths = deriveLatentStrengths(formData, aiRole);
+    const disciplineIndex = clamp(Math.round(scheduleStats.focusHours * 3 + scheduleStats.availableSlots.length * 1.5 + formData.energyLevel * 8), 30, 96);
     return {
       scheduleStats,
       skillScores,
@@ -303,8 +547,12 @@
       strengths,
       latentStrengths,
       disciplineIndex,
-      readinessNarrative: buildReadinessNarrative(roleFit, scheduleStats.weeklyHours),
-      availabilityNarrative: `你的课表中有 ${scheduleStats.availableSlots.length} 个可用学习时段，其中 ${scheduleStats.focusHours.toFixed(1)} 小时属于高专注时间，非常适合安排核心技能与项目任务。`
+      readinessNarrative: roleFit >= 76
+        ? "你已经有比较清晰的职业迁移基础，接下来最重要的是把能力沉淀成可展示成果。"
+        : roleFit >= 58
+          ? "你处在“有潜力但缺闭环”的阶段，Growth AI 更建议你先集中补齐 2 到 3 个关键能力。"
+          : "你当前更适合走系统补齐路线，不求学得多，而要优先学得准、学得能落地。",
+      availabilityNarrative: `系统识别到你每周约有 ${scheduleStats.weeklyHours.toFixed(1)} 小时可支配学习时间，其中 ${scheduleStats.focusHours.toFixed(1)} 小时属于高专注时段，非常适合安排关键能力与项目任务。`
     };
   }
 
@@ -313,15 +561,13 @@
     let weeklyHours = 0;
     let focusHours = 0;
     const examLoadFactor = examWeek ? 0.82 : 1;
-
     schedule.forEach((periods, dayIndex) => {
       periods.forEach((stateKey, periodIndex) => {
-        const period = PERIODS[periodIndex];
         const slotState = SLOT_STATES[stateKey];
-        const baseHours = slotState.hours * examLoadFactor;
-        weeklyHours += baseHours;
+        const hours = slotState.hours * examLoadFactor;
+        weeklyHours += hours;
         if (stateKey === "focus") {
-          focusHours += baseHours;
+          focusHours += hours;
         }
         if (stateKey !== "blocked") {
           availableSlots.push({
@@ -329,33 +575,26 @@
             dayIndex,
             day: DAYS[dayIndex],
             periodIndex,
-            periodKey: period.key,
-            label: `${DAYS[dayIndex]} ${period.label}`,
-            time: period.time,
+            periodLabel: `${DAYS[dayIndex]} ${PERIODS[periodIndex].label}`,
+            time: PERIODS[periodIndex].time,
             stateKey,
-            hours: baseHours,
-            energy: SLOT_STATES[stateKey].energy
+            hours,
+            energy: slotState.energy
           });
         }
       });
     });
-
-    return {
-      weeklyHours,
-      focusHours,
-      availableSlots,
-      examLoadFactor
-    };
+    return { weeklyHours, focusHours, availableSlots, examLoadFactor };
   }
 
-  function inferSkillScores(formData, roleTree, scheduleStats) {
+  function inferSkillScores(formData, aiRole, scheduleStats) {
     const scores = {};
-    roleTree.skills.forEach((skill) => {
-      scores[skill.id] = 18;
+    aiRole.skills.forEach((skill) => {
+      scores[skill.id] = 26;
     });
 
-    const major = normalizeText(formData.studentMajor);
     const resume = normalizeText(formData.resumeText);
+    const prompt = normalizeText(formData.careerPrompt);
     const gradeBoost = {
       "大一": 0,
       "大二": 4,
@@ -363,569 +602,455 @@
       "大四": 10,
       "研一": 10,
       "研二": 12,
-      "研三": 14
+      "研三": 14,
+      "博士": 16
     }[formData.studentGrade] || 6;
 
-    applyMajorBoosts(scores, roleTree.track, major);
-    applyGradeBoost(scores, roleTree.track, gradeBoost);
-
-    EXPERIENCE_TAGS.forEach((tag) => {
-      if (!state.selectedTags.has(tag.id)) {
-        return;
-      }
-      Object.entries(tag.bonuses).forEach(([skillId, bonus]) => {
-        if (skillId in scores) {
-          scores[skillId] += bonus;
+    Object.entries(aiRole.majorBias.scoreBoosts).forEach(([trait, bonus]) => {
+      aiRole.skills.forEach((skill) => {
+        if (skill.id.includes(trait) || skill.brief.includes(trait)) {
+          scores[skill.id] += bonus;
         }
       });
     });
 
-    const keywordRules = buildKeywordRules(roleTree.track);
-    keywordRules.forEach((rule) => {
-      if (rule.pattern.test(resume)) {
-        Object.entries(rule.bonuses).forEach(([skillId, bonus]) => {
-          if (skillId in scores) {
-            scores[skillId] += bonus;
+    EXPERIENCE_TAGS.forEach((tag) => {
+      if (!state.selectedTags.has(tag.id)) return;
+      Object.entries(tag.bonuses).forEach(([trait, bonus]) => {
+        aiRole.skills.forEach((skill) => {
+          if (skill.id.includes(trait) || skill.brief.includes(trait) || skill.name.includes(mapTraitToName(trait))) {
+            scores[skill.id] += bonus;
           }
         });
-      }
+      });
     });
 
-    const scheduleBonus = scheduleStats.weeklyHours > 16 ? 6 : scheduleStats.weeklyHours > 10 ? 4 : 2;
-    const focusBonus = scheduleStats.focusHours > 9 ? 4 : 2;
+    const keywordTable = [
+      { pattern: /(项目|案例|作品集|作品)/, target: ["project", "case", "portfolio"], bonus: 12 },
+      { pattern: /(沟通|汇报|表达|演讲|主持)/, target: ["communication", "reporting", "stakeholder", "expression"], bonus: 10 },
+      { pattern: /(研究|调研|论文|问卷|访谈)/, target: ["research", "analysis"], bonus: 10 },
+      { pattern: /(数据|python|sql|excel|tableau|统计)/, target: ["analysis", "tool", "technical"], bonus: 10 },
+      { pattern: /(社团|组织|策划|运营)/, target: ["execution", "leadership", "solution", "communication"], bonus: 8 },
+      { pattern: /(实习|公司|业务)/, target: ["business", "project", "industry"], bonus: 10 },
+      { pattern: /(设计|原型|视觉|审美)/, target: ["design", "creativity", "portfolio"], bonus: 10 },
+      { pattern: /(教学|助教|辅导|培训)/, target: ["teaching", "service", "communication"], bonus: 10 }
+    ];
 
-    roleTree.skills.forEach((skill) => {
-      if (skill.bucket === "project") {
-        scores[skill.id] += Math.round(scheduleBonus * 0.7);
-      } else {
-        scores[skill.id] += focusBonus;
-      }
-      scores[skill.id] = clamp(Math.round(scores[skill.id]), 16, 94);
+    keywordTable.forEach((rule) => {
+      if (!rule.pattern.test(`${resume} ${prompt}`)) return;
+      aiRole.skills.forEach((skill) => {
+        if (rule.target.some((token) => skill.id.includes(token) || skill.name.includes(mapTraitToName(token)) || skill.brief.includes(mapTraitToName(token)))) {
+          scores[skill.id] += rule.bonus;
+        }
+      });
+    });
+
+    aiRole.skills.forEach((skill) => {
+      scores[skill.id] += skill.bucket === "project" ? Math.round(scheduleStats.weeklyHours * 0.3) : Math.round(scheduleStats.focusHours * 0.25);
+      scores[skill.id] += Math.round(gradeBoost * (skill.bucket === "foundation" ? 0.8 : 0.65));
+      scores[skill.id] = clamp(scores[skill.id], 18, 92);
     });
 
     return scores;
   }
 
-  function applyMajorBoosts(scores, track, major) {
-    const boostByTrack = {
-      technical: [
-        { match: /(计算机|软件|网络|数据|人工智能)/, bonuses: { java_core: 18, mysql_sql: 14, algorithms: 12, spring_boot: 8 } },
-        { match: /(电子|自动化|机械|通信)/, bonuses: { java_core: 8, algorithms: 6, engineering: 4 } }
-      ],
-      product: [
-        { match: /(社会学|新闻|中文|广告|市场|管理|法学)/, bonuses: { communication: 16, user_research: 14, competitor_analysis: 8 } },
-        { match: /(计算机|软件|数据)/, bonuses: { data_analysis: 10, prototype_design: 8, requirement_analysis: 6 } }
-      ],
-      data: [
-        { match: /(统计|数学|经济|金融|数据|计算机)/, bonuses: { statistics: 18, sql: 12, python: 10 } },
-        { match: /(机械|工业|自动化|物理)/, bonuses: { python: 10, business_insight: 8, project_story: 6 } }
-      ]
+  function mapTraitToName(trait) {
+    const table = {
+      analytical: "分析",
+      technical: "工具",
+      project: "项目",
+      communication: "沟通",
+      business: "业务",
+      research: "研究",
+      writing: "写作",
+      service: "服务",
+      leadership: "领导",
+      creativity: "创意",
+      branding: "品牌",
+      teaching: "教学",
+      solution: "方案",
+      reporting: "汇报",
+      design: "设计",
+      portfolio: "作品"
     };
-
-    (boostByTrack[track] || []).forEach((item) => {
-      if (item.match.test(major)) {
-        Object.entries(item.bonuses).forEach(([skillId, bonus]) => {
-          if (skillId in scores) {
-            scores[skillId] += bonus;
-          }
-        });
-      }
-    });
+    return table[trait] || trait;
   }
 
-  function applyGradeBoost(scores, track, gradeBoost) {
-    Object.keys(scores).forEach((skillId) => {
-      const isProjectSkill = /(project|portfolio|story)/.test(skillId);
-      const isFoundation = /(java_core|spring_boot|mysql_sql|user_research|requirement_analysis|python|sql|statistics)/.test(skillId);
-      const multiplier = isProjectSkill ? 0.7 : isFoundation ? 0.9 : 0.8;
-      scores[skillId] += Math.round(gradeBoost * multiplier);
-    });
-
-    if (track === "product") {
-      scores.communication += 3;
-    }
-  }
-
-  function buildKeywordRules(track) {
-    const shared = [
-      { pattern: /(比赛|竞赛|hackathon)/, bonuses: { project_practice: 6, portfolio: 6, project_story: 6 } },
-      { pattern: /(博客|公众号|复盘|输出)/, bonuses: { communication: 5, portfolio: 5, project_story: 5 } },
-      { pattern: /(实习|intern)/, bonuses: { engineering: 8, communication: 8, business_insight: 8, project_practice: 8 } }
-    ];
-
-    const map = {
-      technical: [
-        { pattern: /(java|jvm|集合|并发)/, bonuses: { java_core: 14 } },
-        { pattern: /(spring|springboot|mybatis|接口|api)/, bonuses: { spring_boot: 14, api_design: 12 } },
-        { pattern: /(mysql|sql|数据库|索引)/, bonuses: { mysql_sql: 14 } },
-        { pattern: /(redis|缓存)/, bonuses: { redis: 12 } },
-        { pattern: /(项目|论坛|商城|博客系统)/, bonuses: { project_practice: 12, engineering: 8 } },
-        { pattern: /(算法|leetcode)/, bonuses: { algorithms: 12 } }
-      ],
-      product: [
-        { pattern: /(prd|需求文档|原型)/, bonuses: { prd_writing: 14, prototype_design: 10 } },
-        { pattern: /(访谈|问卷|画像|用户研究)/, bonuses: { user_research: 14, requirement_analysis: 8 } },
-        { pattern: /(竞品|拆解|案例分析)/, bonuses: { competitor_analysis: 14, portfolio: 8 } },
-        { pattern: /(增长|指标|留存|漏斗)/, bonuses: { data_analysis: 12, requirement_analysis: 8 } },
-        { pattern: /(沟通|跨部门|推进|策划)/, bonuses: { communication: 14, portfolio: 6 } }
-      ],
-      data: [
-        { pattern: /(python|pandas|numpy)/, bonuses: { python: 14 } },
-        { pattern: /(sql|mysql|hive|窗口函数)/, bonuses: { sql: 14 } },
-        { pattern: /(统计|回归|显著性|假设检验)/, bonuses: { statistics: 12, ab_test: 8 } },
-        { pattern: /(可视化|图表|tableau|power bi)/, bonuses: { visualization: 12, bi_tools: 10 } },
-        { pattern: /(分析报告|洞察|业务)/, bonuses: { business_insight: 12, project_story: 8 } },
-        { pattern: /(kaggle|项目|作品集)/, bonuses: { project_story: 14, python: 6 } }
-      ]
-    };
-
-    return [...(map[track] || []), ...shared];
-  }
-
-  function buildGapReport(skillScores, roleTree) {
-    const gapItems = roleTree.skills.map((skill) => {
+  function buildGapReport(skillScores, aiRole) {
+    return aiRole.skills.map((skill) => {
       const current = skillScores[skill.id] || 0;
       const gap = Math.max(skill.target - current, 0);
       const gapRatio = gap / 100;
       const missingDeps = skill.deps.filter((depId) => (skillScores[depId] || 0) < 60).length;
+      const transitionPenalty = /(project|portfolio|story|profile|career|public|health)/.test(skill.id) ? 0.08 : 0;
       const priorityScore = Math.round(
-        skill.importance * gapRatio * (1 + skill.difficulty * 0.08 + missingDeps * 0.06) * 100
+        skill.importance * gapRatio * (1 + skill.difficulty * 0.08 + missingDeps * 0.06 + transitionPenalty) * 100
       );
-
       return {
         ...skill,
         current,
         gap,
         gapRatio,
         missingDeps,
-        priorityScore,
-        readinessScore: Math.round((current / skill.target) * 100)
+        priorityScore
       };
-    });
-
-    return gapItems.sort((left, right) => right.priorityScore - left.priorityScore);
+    }).sort((left, right) => right.priorityScore - left.priorityScore);
   }
 
-  function computeRoleFit(skillScores, roleTree) {
-    const totalWeight = roleTree.skills.reduce((sum, skill) => sum + skill.importance, 0);
-    const readiness = roleTree.skills.reduce((sum, skill) => {
-      const current = skillScores[skill.id] || 0;
-      return sum + Math.min(current / skill.target, 1) * skill.importance;
-    }, 0);
-    return Math.round((readiness / totalWeight) * 100);
+  function computeRoleFit(skillScores, skills) {
+    const totalWeight = skills.reduce((sum, skill) => sum + skill.importance, 0);
+    const weighted = skills.reduce((sum, skill) => sum + Math.min((skillScores[skill.id] || 0) / skill.target, 1) * skill.importance, 0);
+    return Math.round((weighted / totalWeight) * 100);
   }
 
-  function deriveLatentStrengths(formData, roleTree) {
-    const talents = [];
+  function deriveLatentStrengths(formData, aiRole) {
+    const values = [];
     const resume = normalizeText(formData.resumeText);
-    if (/(比赛|竞赛|hackathon)/.test(resume)) talents.push("高压场景下的目标推进能力");
-    if (/(策划|社团|负责人|班委)/.test(resume)) talents.push("跨团队协同与表达能力");
-    if (/(项目|作品|案例)/.test(resume)) talents.push("结果导向与成果沉淀意识");
-    if (formData.energyLevel >= 4) talents.push("连续深度学习耐力较强");
-    if (!talents.length) talents.push(`${roleTree.label} 方向的基础迁移潜力明显`);
-    return talents.slice(0, 4);
+    if (/(比赛|竞赛|hackathon)/.test(resume)) values.push("高压情境下的目标推进能力");
+    if (/(调研|论文|科研)/.test(resume)) values.push("研究和结构化分析能力");
+    if (/(运营|策划|社团)/.test(resume)) values.push("组织协作与执行推进能力");
+    if (/(项目|作品|案例)/.test(resume)) values.push("成果导向和项目表达意识");
+    if (!values.length) values.push(`在 ${aiRole.label} 方向具有可迁移成长潜力`);
+    return values.slice(0, 4);
   }
 
-  function buildReadinessNarrative(roleFit, weeklyHours) {
-    if (roleFit >= 78) {
-      return `你已经具备不错的岗位底座，只要把每周 ${weeklyHours.toFixed(1)} 小时稳定投入到项目与表达，就有机会快速进入投递窗口。`;
-    }
-    if (roleFit >= 58) {
-      return `你处在“有基础但缺闭环”的阶段，最关键的是把高优先级差距尽快做成可展示成果。`;
-    }
-    return `你当前更适合先做系统补齐，重点不是学更多，而是按优先级补最关键的几块能力。`;
-  }
-
-  function buildLearningPlan(formData, profile, roleTree, gapReport) {
-    const phaseMonths = allocatePhaseMonths(formData.deadlineMonths);
-    const focusSkills = gapReport.slice(0, 6);
-    const annualPhases = buildAnnualPhases(roleTree, focusSkills, phaseMonths);
-    const monthlyPlan = buildMonthlyPlan(formData, roleTree, focusSkills, annualPhases);
-    const weeklyPlan = buildWeeklyPlan(formData, roleTree, gapReport, monthlyPlan[0], profile.scheduleStats);
-
+  function buildLearningPlan(formData, profile, aiRole, gapReport) {
+    const phases = allocatePhases(formData.deadlineMonths, aiRole);
+    const monthlyPlan = buildMonthlyPlan(formData, aiRole, gapReport, phases);
+    const weeklyPlan = buildWeeklyPlan(formData, gapReport, monthlyPlan[0], profile.scheduleStats);
     return {
-      annualPhases,
+      annualPhases: phases,
       monthlyPlan,
       weeklyPlan,
       highlights: {
-        reviewCount: weeklyPlan.assignedTasks.filter((task) => task.mode === "复习").length,
-        activeSkillCount: new Set(weeklyPlan.assignedTasks.filter((task) => task.skillId).map((task) => task.skillId)).size,
-        plannedHours: weeklyPlan.assignedTasks.reduce((sum, task) => sum + task.hours, 0)
+        plannedHours: weeklyPlan.assignedTasks.reduce((sum, task) => sum + task.hours, 0),
+        reviewCount: weeklyPlan.assignedTasks.filter((task) => task.mode === "复习").length
       }
     };
   }
 
-  function allocatePhaseMonths(totalMonths) {
-    const first = Math.max(1, Math.round(totalMonths * 0.4));
-    const second = Math.max(1, Math.round(totalMonths * 0.35));
-    let third = totalMonths - first - second;
-    if (third < 1) {
-      third = 1;
-      if (second > 1) {
-        return [first, second - 1, third];
-      }
-      return [Math.max(1, first - 1), second, third];
-    }
-    return [first, second, third];
-  }
-
-  function buildAnnualPhases(roleTree, focusSkills, phaseMonths) {
-    const foundation = focusSkills.filter((item) => item.bucket === "foundation").slice(0, 3);
-    const growth = focusSkills.filter((item) => item.bucket !== "project").slice(0, 3);
-    const project = roleTree.skills.filter((skill) => skill.bucket === "project").slice(0, 2);
-
+  function allocatePhases(totalMonths, aiRole) {
+    const phaseOne = Math.max(1, Math.round(totalMonths * 0.35));
+    const phaseTwo = Math.max(1, Math.round(totalMonths * 0.4));
+    const phaseThree = Math.max(1, totalMonths - phaseOne - phaseTwo);
     return [
       {
-        title: "Phase 1 · 基础补齐",
-        months: phaseMonths[0],
-        milestone: "搭出可复用的技能骨架",
-        outcome: "完成知识笔记、关键概念闭环和 1 个可运行 demo。",
-        focuses: foundation.map((item) => item.name)
+        title: "Phase 1 · 能力底座搭建",
+        months: phaseOne,
+        milestone: `先理解 ${aiRole.label} 的能力结构，并补齐最核心的基础能力`,
+        outcome: "完成基础技能梳理、关键概念清单和第一份小成果",
+        focuses: aiRole.skills.slice(0, 2).map((item) => item.name)
       },
       {
-        title: "Phase 2 · 项目沉淀",
-        months: phaseMonths[1],
-        milestone: "形成可以投递的作品材料",
-        outcome: "把技能点串成真实项目 / 作品集，补齐业务表达与复盘能力。",
-        focuses: growth.map((item) => item.name)
+        title: "Phase 2 · 项目 / 案例沉淀",
+        months: phaseTwo,
+        milestone: "把能力变成可展示的案例、作品或实战经历",
+        outcome: "完成至少 1 个完整项目、作品集或案例报告",
+        focuses: aiRole.skills.filter((item) => item.bucket !== "foundation").slice(0, 3).map((item) => item.name)
       },
       {
-        title: "Phase 3 · 面试冲刺",
-        months: phaseMonths[2],
-        milestone: "提升岗位匹配度与面试转化率",
-        outcome: "打磨项目故事、模拟问答、完成针对性投递。",
-        focuses: project.map((item) => item.name)
+        title: "Phase 3 · 投递与转化",
+        months: phaseThree,
+        milestone: "提升面试表达、岗位匹配度和投递成功率",
+        outcome: "完成简历打磨、面试话术和定向投递准备",
+        focuses: aiRole.skills.filter((item) => item.bucket === "project").slice(0, 2).map((item) => item.name)
       }
     ];
   }
 
-  function buildMonthlyPlan(formData, roleTree, focusSkills, annualPhases) {
-    const months = [];
-    let phaseCursor = 0;
-    let phaseMonthCount = 0;
-    const outputsByTrack = {
-      technical: ["完成 1 份知识图谱", "完成 1 个后端模块", "完成 1 次面试复盘", "补 15 道高频题"],
-      product: ["完成 1 份竞品拆解", "完成 1 份 PRD", "完成 1 份原型稿", "完成 1 次作品集讲述"],
-      data: ["完成 1 份 SQL 查询集", "完成 1 个分析报告", "完成 1 份可视化 Dashboard", "完成 1 次项目复盘"]
-    };
-
-    for (let index = 0; index < formData.deadlineMonths; index += 1) {
-      if (phaseMonthCount >= annualPhases[phaseCursor].months && phaseCursor < annualPhases.length - 1) {
-        phaseCursor += 1;
-        phaseMonthCount = 0;
+  function buildMonthlyPlan(formData, aiRole, gapReport, phases) {
+    const plans = [];
+    let phaseIndex = 0;
+    let phaseProgress = 0;
+    for (let monthIndex = 0; monthIndex < formData.deadlineMonths; monthIndex += 1) {
+      if (phaseProgress >= phases[phaseIndex].months && phaseIndex < phases.length - 1) {
+        phaseIndex += 1;
+        phaseProgress = 0;
       }
-      const phase = annualPhases[phaseCursor];
-      const start = (index * 2) % focusSkills.length;
-      const monthFocus = focusSkills.slice(start, start + 2).map((item) => item.name);
-      const output = outputsByTrack[roleTree.track][index % outputsByTrack[roleTree.track].length];
-      const load = formData.examWeek && index === 0 ? "减负模式" : index === formData.deadlineMonths - 1 ? "冲刺模式" : "稳步推进";
-
-      months.push({
-        monthIndex: index + 1,
-        title: `第 ${index + 1} 月`,
+      const phase = phases[phaseIndex];
+      const focus = gapReport.slice(monthIndex % 2, monthIndex % 2 + 2).map((item) => item.name);
+      plans.push({
+        monthIndex: monthIndex + 1,
+        title: `第 ${monthIndex + 1} 月`,
         phase: phase.title,
-        load,
-        focus: monthFocus,
-        output,
-        note: phaseMonthCount === 0 ? `承接 ${phase.milestone}` : `沿着 ${phase.title} 继续推进`
+        load: formData.examWeek && monthIndex === 0 ? "减负模式" : monthIndex === formData.deadlineMonths - 1 ? "冲刺模式" : "稳步推进",
+        focus,
+        output: monthIndex < 2 ? "输出学习地图 / 知识结构图" : monthIndex < formData.deadlineMonths - 1 ? "完成项目案例或作品雏形" : "完成简历、话术与投递包",
+        note: phase.milestone
       });
-      phaseMonthCount += 1;
+      phaseProgress += 1;
     }
-    return months;
+    return plans;
   }
 
-  function buildWeeklyPlan(formData, roleTree, gapReport, currentMonth, scheduleStats) {
-    const taskQueue = buildTaskQueue(roleTree, gapReport, currentMonth);
-    const assignments = assignTasksToSlots(scheduleStats.availableSlots, taskQueue, formData.examWeek);
-    const grid = buildScheduleGrid(assignments, formData.schedule);
-    return {
-      currentMonth,
-      assignedTasks: assignments,
-      grid
-    };
-  }
-
-  function buildTaskQueue(roleTree, gapReport, currentMonth) {
-    const topGaps = gapReport.slice(0, 3);
-    const queue = [];
-
-    topGaps.forEach((gap, index) => {
-      queue.push({
-        id: `${gap.id}-learn`,
-        skillId: gap.id,
-        title: `${gap.name} 核心概念学习`,
+  function buildWeeklyPlan(formData, gapReport, currentMonth, scheduleStats) {
+    const taskQueue = [];
+    gapReport.slice(0, 3).forEach((item, index) => {
+      taskQueue.push({
+        title: `${item.name} 核心学习`,
         mode: "新知",
+        skillId: item.id,
         hours: index === 0 ? 3 : 2,
-        priority: gap.priorityScore + 8,
-        deliverable: `输出 1 页 ${gap.short} 笔记`
+        deliverable: `形成 1 份关于 ${item.short} 的结构化笔记`
       });
-      queue.push({
-        id: `${gap.id}-practice`,
-        skillId: gap.id,
-        title: `${gap.name} 动手练习`,
+      taskQueue.push({
+        title: `${item.name} 实操 / 小练习`,
         mode: "实操",
-        hours: 2.5,
-        priority: gap.priorityScore,
-        deliverable: `完成 1 个 ${gap.short} 练习任务`
+        skillId: item.id,
+        hours: 2,
+        deliverable: `完成 1 个与 ${item.name} 相关的小任务`
       });
     });
-
-    const projectSkill = roleTree.skills.find((skill) => skill.bucket === "project");
-    queue.push({
-      id: `${projectSkill.id}-project`,
-      skillId: projectSkill.id,
-      title: `${projectSkill.name} 作品沉淀`,
+    taskQueue.push({
+      title: "项目 / 案例推进",
       mode: "项目",
+      skillId: gapReport[0].id,
       hours: 3,
-      priority: 55,
       deliverable: currentMonth.output
     });
-    queue.push({
-      id: "weekly-review",
-      skillId: "",
-      title: "本周复盘与下周校准",
+    taskQueue.push({
+      title: "周回访与复盘",
       mode: "复盘",
+      skillId: "",
       hours: 2,
-      priority: 44,
-      deliverable: "记录难点、复盘效率、微调任务"
+      deliverable: "总结收获、记录阻力并调整下周重点"
     });
 
-    return queue.sort((left, right) => right.priority - left.priority);
+    const assignments = assignTasksToSlots(scheduleStats.availableSlots, taskQueue, formData.examWeek);
+    return {
+      assignedTasks: assignments,
+      grid: buildScheduleGrid(assignments, formData.schedule)
+    };
   }
 
   function assignTasksToSlots(availableSlots, taskQueue, examWeek) {
-    const assignments = [];
     const slotPool = availableSlots.map((slot) => ({ ...slot, assigned: false }));
-    const reviewRequests = [];
-
+    const assignments = [];
     taskQueue.forEach((task) => {
-      const preferredSlot = slotPool
-        .filter((slot) => !slot.assigned && slot.hours >= Math.min(task.hours, 2))
+      const candidate = slotPool
+        .filter((slot) => !slot.assigned)
         .sort((left, right) => right.energy - left.energy || left.dayIndex - right.dayIndex || left.periodIndex - right.periodIndex)[0];
-
-      if (!preferredSlot) {
-        return;
-      }
-
-      preferredSlot.assigned = true;
-      const assignment = {
-        ...preferredSlot,
+      if (!candidate) return;
+      candidate.assigned = true;
+      assignments.push({
+        ...candidate,
         title: task.title,
-        skillId: task.skillId,
         mode: task.mode,
-        hours: preferredSlot.hours,
+        skillId: task.skillId,
+        hours: candidate.hours,
         deliverable: task.deliverable,
-        stateClass: preferredSlot.stateKey === "focus" ? "is-focus" : ""
-      };
-      assignments.push(assignment);
-
+        stateClass: task.mode === "复习" ? "is-review" : candidate.stateKey === "focus" ? "is-focus" : ""
+      });
       if (task.mode === "新知") {
-        reviewRequests.push({ skillId: task.skillId, skillName: task.title.split(" 核心概念学习")[0], dayIndex: preferredSlot.dayIndex });
-      }
-    });
-
-    reviewRequests.forEach((request, index) => {
-      [1, 3].forEach((offset) => {
-        const reviewSlot = slotPool.find((slot) => !slot.assigned && slot.dayIndex >= request.dayIndex + offset);
+        const reviewSlot = slotPool.find((slot) => !slot.assigned && slot.dayIndex >= candidate.dayIndex + 1);
         if (reviewSlot) {
           reviewSlot.assigned = true;
           assignments.push({
             ...reviewSlot,
-            title: `${request.skillName} 复习回看`,
-            skillId: request.skillId,
+            title: `${task.title} 复习回看`,
             mode: "复习",
+            skillId: task.skillId,
             hours: reviewSlot.hours,
-            deliverable: `回顾重点并修正 1 处误区`,
+            deliverable: "回顾重点并修正理解偏差",
             stateClass: "is-review"
-          });
-        }
-      });
-      if (examWeek && index === 0) {
-        const bufferSlot = slotPool.find((slot) => !slot.assigned);
-        if (bufferSlot) {
-          bufferSlot.assigned = true;
-          assignments.push({
-            ...bufferSlot,
-            title: "考试周减负缓冲",
-            skillId: "",
-            mode: "缓冲",
-            hours: bufferSlot.hours,
-            deliverable: "仅完成最低保底任务",
-            stateClass: ""
           });
         }
       }
     });
 
-    slotPool
-      .filter((slot) => !slot.assigned)
-      .forEach((slot) => {
-        assignments.push({
-          ...slot,
-          title: slot.stateKey === "focus" ? "弹性强化 / 项目补位" : "轻量整理 / 休息",
-          skillId: "",
-          mode: slot.stateKey === "focus" ? "强化" : "缓冲",
-          hours: slot.hours,
-          deliverable: slot.stateKey === "focus" ? "补齐拖延任务或加深练习" : "整理笔记、回收精力",
-          stateClass: slot.stateKey === "focus" ? "is-focus" : ""
-        });
+    slotPool.filter((slot) => !slot.assigned).forEach((slot, index) => {
+      assignments.push({
+        ...slot,
+        title: examWeek && index === 0 ? "考试周缓冲" : slot.stateKey === "focus" ? "弹性强化时间" : "轻量整理 / 休息",
+        mode: examWeek && index === 0 ? "缓冲" : slot.stateKey === "focus" ? "强化" : "整理",
+        skillId: "",
+        hours: slot.hours,
+        deliverable: examWeek && index === 0 ? "保留给不确定任务与减负" : slot.stateKey === "focus" ? "补齐拖延任务或加深练习" : "整理笔记、回收精力",
+        stateClass: slot.stateKey === "focus" ? "is-focus" : ""
       });
-
+    });
     return assignments.sort((left, right) => left.dayIndex - right.dayIndex || left.periodIndex - right.periodIndex);
   }
 
   function buildScheduleGrid(assignments, schedule) {
-    return DAYS.map((day, dayIndex) => {
-      return {
-        day,
-        slots: PERIODS.map((period, periodIndex) => {
-          const slotState = schedule[dayIndex][periodIndex];
-          const assignment = assignments.find((item) => item.dayIndex === dayIndex && item.periodIndex === periodIndex);
-          return {
-            periodLabel: `${period.label} ${period.time}`,
-            slotState,
-            assignment: assignment || {
-              title: "课堂 / 已占用",
-              mode: "锁定",
-              deliverable: "不安排学习任务",
-              stateClass: "is-blocked"
-            }
-          };
-        })
-      };
-    });
+    return DAYS.map((day, dayIndex) => ({
+      day,
+      slots: PERIODS.map((period, periodIndex) => {
+        const slotState = schedule[dayIndex][periodIndex];
+        const assignment = assignments.find((item) => item.dayIndex === dayIndex && item.periodIndex === periodIndex);
+        return {
+          periodLabel: `${period.label} ${period.time}`,
+          slotState,
+          assignment: assignment || {
+            title: "课程 / 已占用",
+            mode: "锁定",
+            deliverable: "不安排学习任务",
+            stateClass: "is-blocked"
+          }
+        };
+      })
+    }));
   }
 
-  function buildResourcePlan(formData, roleTree, gapReport, plan) {
-    const topSkills = gapReport.slice(0, 4);
-    const targetDuration = formData.energyLevel >= 4 ? 100 : 70;
-
-    return topSkills.map((gap) => {
-      const resources = RESOURCES
-        .filter((resource) => resource.role === formData.targetRole && resource.skills.includes(gap.id))
-        .map((resource) => {
-          const contentMatch = resource.skills.includes(gap.id) ? 1 : overlapRatio(resource.skills, [gap.id]);
-          const skillRatio = gap.current / gap.target;
-          const desiredDifficulty = skillRatio < 0.45 ? 2 : skillRatio < 0.7 ? 3 : 4;
-          const difficultyFit = 1 - Math.min(Math.abs(resource.difficulty - desiredDifficulty) / 4, 1);
-          const durationFit = 1 - Math.min(Math.abs(resource.duration - targetDuration) / 150, 1);
-          const qualitySignal = resource.quality / 5;
-          const setupFit = 1 - Math.min(resource.setupCost / 5, 1);
-          const score = Math.round(
-            (contentMatch * 0.38 + difficultyFit * 0.24 + durationFit * 0.2 + qualitySignal * 0.12 + setupFit * 0.06) * 100
-          );
-
-          return {
-            ...resource,
-            score,
-            reason: `${resource.platform} 的 ${resource.type} 与「${gap.name}」高度匹配，预计能在 ${Math.round(resource.duration)} 分钟内完成一个清晰学习闭环，适合你当前每周 ${plan.highlights.plannedHours.toFixed(1)} 小时的节奏。`
-          };
-        })
-        .sort((left, right) => right.score - left.score)
-        .slice(0, 2);
-
-      return {
-        skillName: gap.name,
-        brief: gap.brief,
-        resources
-      };
-    });
+  function buildResourcePlan(aiRole, gapReport, plan) {
+    const baseResources = RESOURCE_LIBRARY[aiRole.track] || RESOURCE_LIBRARY.analysis;
+    return gapReport.slice(0, 4).map((gap, index) => ({
+      skillName: gap.name,
+      brief: gap.brief,
+      resources: baseResources.map((item, resourceIndex) => ({
+        title: `${item.title} · ${gap.short}`,
+        platform: item.platform,
+        type: item.type,
+        difficulty: clamp(2 + index + resourceIndex, 1, 5),
+        duration: 45 + index * 25 + resourceIndex * 15,
+        score: clamp(92 - index * 6 - resourceIndex * 4, 70, 98),
+        highlight: item.fit,
+        reason: `Growth AI 判断你当前最需要补的是「${gap.name}」，所以优先推荐更适合当前阶段的 ${item.type} 资源，用来支撑本周与本月的关键目标。`,
+        url: "#"
+      })).slice(0, 2)
+    }));
   }
 
   function updateCoachFromInputs() {
     els.completionValue.textContent = `${els.completionRate.value}%`;
     els.difficultyValue.textContent = `${els.difficultyRate.value} / 100`;
     els.confidenceValue.textContent = `${els.confidenceRate.value} / 100`;
-
-    if (!state.plan || !state.profile) {
-      return;
-    }
-
+    if (!state.plan || !state.profile) return;
     const completion = Number(els.completionRate.value);
     const difficulty = Number(els.difficultyRate.value);
     const confidence = Number(els.confidenceRate.value);
-    const coach = buildCoachOutput(state.profile, state.gapReport, state.plan, completion, difficulty, confidence);
-    state.coach = coach;
-    renderCoach(coach);
+    state.coach = buildCoachOutput(state.profile, state.gapReport, completion, difficulty, confidence);
+    renderCoach(state.coach);
   }
 
-  function buildCoachOutput(profile, gapReport, plan, completion, difficulty, confidence) {
+  function buildCoachOutput(profile, gapReport, completion, difficulty, confidence) {
     let strategy = "保持主线";
-    let loadDelta = "下周维持当前负荷";
+    let loadDelta = "下周维持当前学习负荷";
     let actionList = [];
 
-    if (completion < 60 || difficulty > 70) {
+    if (completion < 60 || difficulty > 72) {
       strategy = "减负稳住";
-      loadDelta = "减少并行技能数，优先保住前 2 个核心差距";
+      loadDelta = "减少并行目标，优先保住前 2 个高优先级差距";
       actionList = [
-        "把本周并行学习技能数从 3 个降到 2 个。",
-        "周中新增 1 个复习时段，避免学了就忘。",
-        "将项目任务拆成更小里程碑，先拿到一次可见成果。"
+        "将并行学习重点从 3 个缩减为 2 个",
+        "提高复习时段比重，避免学了就忘",
+        "将项目任务拆成更小里程碑，优先完成可见成果"
       ];
     } else if (completion > 85 && confidence > 72) {
       strategy = "提前提速";
-      loadDelta = "把 1 个高专注时段切给项目深挖或面试表达";
+      loadDelta = "增加 1 个项目深化时段和 1 个职业表达任务";
       actionList = [
-        "提前进入项目沉淀阶段，拉高作品输出密度。",
-        "加入 1 次模拟面试 / 案例讲述复盘。",
-        "资源推荐里提高 GitHub 项目和中高难材料权重。"
+        "把更多时间投入到案例沉淀与简历表达",
+        "提前加入模拟面试 / 作品讲述训练",
+        "提高中高难资源权重，加快进入投递准备阶段"
       ];
     } else {
       actionList = [
-        "继续按现有主线推进，优先完成首个核心 deliverable。",
-        "保留周日复盘，检查是否需要重排某个难点技能。",
-        "对高优先级技能保持“新知 + 练习 + 复习”三段式节奏。"
+        "维持当前主线，优先完成第一个关键成果",
+        "保留周日复盘，动态检查差距排序是否变化",
+        "对核心技能保持“新知 + 实操 + 复习”节奏"
       ];
     }
 
     const nextFit = clamp(Math.round(profile.roleFit + completion * 0.08 - difficulty * 0.03 + confidence * 0.02), 35, 96);
-    const trend = [0, 1, 2, 3].map((weekIndex) => {
-      const uplift = weekIndex * (completion > 80 ? 4 : completion < 60 ? 2 : 3);
-      const friction = weekIndex * (difficulty > 70 ? 1.2 : 0.6);
-      return clamp(Math.round(profile.roleFit + uplift - friction), 28, 98);
-    });
+    const trend = [0, 1, 2, 3].map((index) => clamp(Math.round(profile.roleFit + index * (completion > 80 ? 4 : 2.8) - index * (difficulty > 70 ? 1.2 : 0.5)), 28, 98));
 
     return {
       strategy,
       loadDelta,
       actionList,
-      nextFit,
-      morale: completion >= 70 ? "你已经建立起稳定节奏，接下来重点是把成果做得更像“可投递材料”。" : "这周不需要追求全做完，先守住最高优先级任务，连续性比完美更重要。",
+      morale: completion >= 70 ? "你已经建立起稳定节奏，接下来更重要的是把成果做得更像真正可投递的材料。" : "这周不用追求完美，先守住最关键任务，连续性比一次爆发更重要。",
       topWatch: gapReport[0].name,
+      nextFit,
       trend
     };
   }
 
-  function renderDashboard(formData, profile, gapReport) {
+  function renderWorkspaceSummary() {
+    if (!state.currentUser) return;
+    const latestPlanTime = state.history[0] ? formatTime(state.history[0].updatedAt || state.history[0].createdAt) : "暂无";
+    els.workspaceSummary.innerHTML = `
+      <article class="summary-card">
+        <div class="card-title-row">
+          <h3>${state.currentUser.displayName}</h3>
+          <span class="mini-note">@${state.currentUser.username}</span>
+        </div>
+        <div class="summary-list">
+          <article>
+            <strong>数据库状态</strong>
+            <p>已连接本地 IndexedDB，每个账号独立保存方案。</p>
+          </article>
+          <article>
+            <strong>历史方案数</strong>
+            <p>${state.history.length} 条 · 最近更新：${latestPlanTime}</p>
+          </article>
+        </div>
+      </article>
+    `;
+  }
+
+  function renderHistory() {
+    if (!state.history.length) {
+      els.historyList.innerHTML = `<article class="history-item empty-state">还没有历史版本，先生成一套方案并点击“保存版本”。</article>`;
+      return;
+    }
+    els.historyList.innerHTML = state.history.map((item) => `
+      <button type="button" class="history-item" data-plan-id="${item.id}">
+        <strong>${item.title}</strong>
+        <span>${item.careerTarget || "未命名职业目标"} · ${formatTime(item.updatedAt || item.createdAt)}</span>
+      </button>
+    `).join("");
+    els.historyList.querySelectorAll("[data-plan-id]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const record = await getRecord(PLAN_STORE, button.dataset.planId);
+        if (record) {
+          restorePlanRecord(record);
+          showToast("已回载历史版本");
+        }
+      });
+    });
+  }
+
+  function renderAIConsole(trace) {
+    els.aiConsole.innerHTML = trace.map((line, index) => `
+      <article class="console-line">
+        <span class="console-index">0${index + 1}</span>
+        <p>${line}</p>
+      </article>
+    `).join("");
+  }
+
+  function renderDashboard(formData, aiRole, profile, gapReport) {
     const topGap = gapReport[0];
     const stats = [
       { value: `${profile.scheduleStats.weeklyHours.toFixed(1)}h`, label: "每周真实学习预算" },
-      { value: `${profile.roleFit}%`, label: "岗位匹配度" },
+      { value: `${profile.roleFit}%`, label: "目标匹配度" },
       { value: `${profile.disciplineIndex}`, label: "执行稳定度指数" },
       { value: topGap ? topGap.name : "-", label: "当前第一优先级" }
     ];
-
-    els.dashboardStats.innerHTML = stats
-      .map((item) => `
-        <article class="stat-card">
-          <strong>${item.value}</strong>
-          <span>${item.label}</span>
-        </article>
-      `)
-      .join("");
+    els.dashboardStats.innerHTML = stats.map((item) => `
+      <article class="stat-card">
+        <strong>${item.value}</strong>
+        <span>${item.label}</span>
+      </article>
+    `).join("");
 
     els.profileSummary.innerHTML = `
       <article>
-        <strong>${formData.studentName || "该同学"} 的成长画像</strong>
+        <strong>${formData.studentName || "该用户"} 的 Growth 画像</strong>
         <p>${profile.readinessNarrative}</p>
+      </article>
+      <article>
+        <strong>AI 职业识别</strong>
+        <p>系统将「${aiRole.label}」识别为：${aiRole.blueprint}</p>
       </article>
       <article>
         <strong>时间画像</strong>
         <p>${profile.availabilityNarrative}</p>
       </article>
       <article>
-        <strong>目标岗位</strong>
-        <p>${ROLE_TREES[formData.targetRole].label}，当前建议优先补齐「${gapReport[0].name}」「${gapReport[1].name}」两块能力。</p>
+        <strong>关键缺口提示</strong>
+        <p>当前最应优先补齐的是「${gapReport[0].name}」和「${gapReport[1].name}」，它们直接决定你后续项目和投递表达的质量。</p>
       </article>
     `;
 
@@ -936,75 +1061,71 @@
 
     els.heroHours.textContent = `${profile.scheduleStats.weeklyHours.toFixed(1)}h`;
     els.heroFit.textContent = `${profile.roleFit}%`;
-    els.heroGaps.textContent = `${gapReport.filter((item) => item.priorityScore >= 20).length}`;
+    els.heroGaps.textContent = `${gapReport.filter((item) => item.priorityScore >= 18).length}`;
 
-    renderRadar(profile.skillScores, ROLE_TREES[formData.targetRole]);
+    renderRadar(profile.skillScores, aiRole.skills);
   }
 
-  function renderRadar(skillScores, roleTree) {
-    const skills = roleTree.skills.slice(0, 6);
+  function renderRadar(skillScores, skills) {
+    const radarSkills = skills.slice(0, 6);
     const size = 340;
     const center = size / 2;
     const radius = 114;
-    const angleStep = (Math.PI * 2) / skills.length;
-
+    const angleStep = (Math.PI * 2) / radarSkills.length;
     const levels = [20, 40, 60, 80, 100];
     const gridPolygons = levels.map((level) => {
-      const points = skills.map((_, index) => {
+      const points = radarSkills.map((_, index) => {
         const angle = -Math.PI / 2 + index * angleStep;
         const r = radius * (level / 100);
         return `${center + Math.cos(angle) * r},${center + Math.sin(angle) * r}`;
       }).join(" ");
       return `<polygon points="${points}" fill="none" stroke="rgba(23,50,47,0.12)" stroke-width="1"></polygon>`;
     }).join("");
-
-    const axes = skills.map((skill, index) => {
+    const axes = radarSkills.map((skill, index) => {
       const angle = -Math.PI / 2 + index * angleStep;
       const x = center + Math.cos(angle) * radius;
       const y = center + Math.sin(angle) * radius;
-      const labelX = center + Math.cos(angle) * (radius + 20);
-      const labelY = center + Math.sin(angle) * (radius + 20);
+      const labelX = center + Math.cos(angle) * (radius + 22);
+      const labelY = center + Math.sin(angle) * (radius + 22);
       return `
         <line x1="${center}" y1="${center}" x2="${x}" y2="${y}" stroke="rgba(23,50,47,0.12)"></line>
         <text x="${labelX}" y="${labelY}" text-anchor="middle" font-size="12">${skill.short}</text>
       `;
     }).join("");
 
-    const currentPoints = skills.map((skill, index) => {
+    const currentPoints = radarSkills.map((skill, index) => {
       const angle = -Math.PI / 2 + index * angleStep;
       const r = radius * ((skillScores[skill.id] || 0) / 100);
       return `${center + Math.cos(angle) * r},${center + Math.sin(angle) * r}`;
     }).join(" ");
 
-    const targetPoints = skills.map((skill, index) => {
+    const targetPoints = radarSkills.map((skill, index) => {
       const angle = -Math.PI / 2 + index * angleStep;
       const r = radius * (skill.target / 100);
       return `${center + Math.cos(angle) * r},${center + Math.sin(angle) * r}`;
     }).join(" ");
 
     els.radarChart.innerHTML = `
-      <svg class="radar-svg" viewBox="0 0 ${size} ${size}" width="100%" height="320" aria-label="技能雷达图">
+      <svg class="radar-svg" viewBox="0 0 ${size} ${size}" width="100%" height="320" aria-label="能力雷达图">
         ${gridPolygons}
         ${axes}
-        <polygon points="${targetPoints}" fill="rgba(216,108,72,0.14)" stroke="rgba(216,108,72,0.8)" stroke-width="2"></polygon>
+        <polygon points="${targetPoints}" fill="rgba(216,108,72,0.14)" stroke="rgba(216,108,72,0.85)" stroke-width="2"></polygon>
         <polygon points="${currentPoints}" fill="rgba(14,133,117,0.18)" stroke="rgba(14,133,117,0.95)" stroke-width="2.5"></polygon>
         <circle cx="${center}" cy="${center}" r="4" fill="var(--accent-strong)"></circle>
       </svg>
     `;
   }
 
-  function renderGapAnalysis(roleTree, gapReport) {
+  function renderGapAnalysis(aiRole, gapReport) {
     const highPriority = gapReport.filter((item) => item.priorityScore >= 20).length;
     const mediumPriority = gapReport.filter((item) => item.priorityScore >= 10 && item.priorityScore < 20).length;
-    const lowRisk = gapReport.length - highPriority - mediumPriority;
-
+    const lowPriority = gapReport.length - highPriority - mediumPriority;
     els.gapOverview.innerHTML = `
+      <span class="summary-pill">职业蓝图：${aiRole.blueprint}</span>
       <span class="summary-pill">高优先级差距 ${highPriority} 个</span>
       <span class="summary-pill">中优先级差距 ${mediumPriority} 个</span>
-      <span class="summary-pill">已接近岗位要求 ${lowRisk} 个</span>
-      <span class="summary-pill">技能树节点 ${roleTree.skills.length} 个</span>
+      <span class="summary-pill">基础较稳 ${lowPriority} 个</span>
     `;
-
     els.gapList.innerHTML = gapReport.map((item) => `
       <article class="gap-item">
         <div class="gap-head">
@@ -1023,8 +1144,8 @@
         <p>${item.brief}</p>
         <div class="dependency-row">
           ${item.deps.length ? item.deps.map((depId) => {
-            const dep = roleTree.skills.find((skill) => skill.id === depId);
-            return `<span class="dependency-chip">依赖：${dep.short}</span>`;
+            const dep = aiRole.skills.find((skill) => skill.id === depId);
+            return `<span class="dependency-chip">依赖：${dep ? dep.short : depId}</span>`;
           }).join("") : `<span class="dependency-chip">可直接启动</span>`}
         </div>
       </article>
@@ -1040,9 +1161,7 @@
         </header>
         <p><strong>阶段里程碑：</strong>${phase.milestone}</p>
         <p><strong>核心产出：</strong>${phase.outcome}</p>
-        <div class="focus-list">
-          ${phase.focuses.map((focus) => `<span class="focus-chip">${focus}</span>`).join("")}
-        </div>
+        <div class="focus-list">${phase.focuses.map((focus) => `<span class="focus-chip">${focus}</span>`).join("")}</div>
       </article>
     `).join("");
 
@@ -1055,9 +1174,7 @@
         <p><strong>所属阶段：</strong>${month.phase}</p>
         <p><strong>本月输出：</strong>${month.output}</p>
         <p><strong>推进备注：</strong>${month.note}</p>
-        <div class="focus-list">
-          ${month.focus.map((focus) => `<span class="focus-chip">${focus}</span>`).join("")}
-        </div>
+        <div class="focus-list">${month.focus.map((focus) => `<span class="focus-chip">${focus}</span>`).join("")}</div>
       </article>
     `).join("");
 
@@ -1100,7 +1217,7 @@
               <p class="resource-reason">${resource.reason}</p>
               <div class="resource-actions">
                 <span class="mini-note">${resource.highlight}</span>
-                <a class="resource-link" href="${resource.url}" target="_blank" rel="noreferrer">查看资源</a>
+                <a class="resource-link" href="${resource.url}" target="_blank" rel="noreferrer">查看思路</a>
               </div>
             </article>
           `).join("")}
@@ -1116,8 +1233,8 @@
         <p>${coach.loadDelta}</p>
       </article>
       <article>
-        <strong>重点盯防技能</strong>
-        <p>${coach.topWatch} 仍是当前最可能拉开差距的关键节点。</p>
+        <strong>重点盯防能力</strong>
+        <p>${coach.topWatch} 仍是当前最可能拉开差距的关键能力节点。</p>
       </article>
       <article>
         <strong>回访结论</strong>
@@ -1128,7 +1245,6 @@
         <p>${coach.actionList.join("；")}</p>
       </article>
     `;
-
     renderTrend(coach.trend, coach.nextFit);
   }
 
@@ -1139,17 +1255,15 @@
     const maxValue = 100;
     const points = trend.map((value, index) => {
       const x = padding + (index * (width - padding * 2)) / (trend.length - 1);
-      const y = height - padding - ((value / maxValue) * (height - padding * 2));
+      const y = height - padding - (value / maxValue) * (height - padding * 2);
       return { x, y, value };
     });
-
     const polyline = points.map((point) => `${point.x},${point.y}`).join(" ");
     const pointDots = points.map((point, index) => `
       <circle cx="${point.x}" cy="${point.y}" r="5" fill="var(--accent)"></circle>
       <text x="${point.x}" y="${point.y - 12}" text-anchor="middle" font-size="12">${point.value}%</text>
       <text x="${point.x}" y="${height - 10}" text-anchor="middle" font-size="12">W${index + 1}</text>
     `).join("");
-
     els.coachTrend.innerHTML = `
       <svg class="trend-svg" viewBox="0 0 ${width} ${height}" width="100%" height="260" aria-label="成长趋势预测">
         <rect x="0" y="0" width="${width}" height="${height}" rx="20" fill="rgba(255,255,255,0.35)"></rect>
@@ -1158,25 +1272,166 @@
         <polyline points="${polyline}" fill="none" stroke="rgba(14,133,117,0.9)" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"></polyline>
         ${pointDots}
       </svg>
-      <span class="trend-note">若保持当前调整策略，4 周后预计岗位匹配度可达 <strong>${nextFit}%</strong> 左右。</span>
+      <span class="trend-note">若保持当前策略，4 周后目标匹配度预计可达 <strong>${nextFit}%</strong> 左右。</span>
     `;
   }
 
-  function setInputValue(id, value) {
-    const input = document.getElementById(id);
-    if (input.type === "checkbox") {
-      input.checked = Boolean(value);
-    } else {
-      input.value = value;
-    }
+  async function saveCurrentPlan(reason) {
+    const formData = readFormData();
+    const record = {
+      id: `${state.currentUser.username}-${Date.now()}`,
+      userId: state.currentUser.username,
+      title: `${formData.studentName || state.currentUser.displayName} · ${formData.careerTarget || "职业目标"} · ${reason}`,
+      careerTarget: formData.careerTarget,
+      formData,
+      schedule: clone(state.schedule),
+      selectedTags: Array.from(state.selectedTags),
+      profile: state.profile,
+      gapReport: state.gapReport,
+      plan: state.plan,
+      resources: state.resources,
+      aiTrace: state.lastAiTrace,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      isDraft: false
+    };
+    await putRecord(PLAN_STORE, record);
+    await loadUserHistory();
+    showToast("当前方案已保存到你的数据库");
   }
 
-  function getInputValue(id) {
-    return document.getElementById(id).value;
+  async function saveDraftPlan() {
+    if (!state.currentUser || !state.plan) return;
+    const formData = readFormData();
+    const record = {
+      id: `${state.currentUser.username}-draft`,
+      userId: state.currentUser.username,
+      title: `${formData.studentName || state.currentUser.displayName} · 当前草稿`,
+      careerTarget: formData.careerTarget,
+      formData,
+      schedule: clone(state.schedule),
+      selectedTags: Array.from(state.selectedTags),
+      profile: state.profile,
+      gapReport: state.gapReport,
+      plan: state.plan,
+      resources: state.resources,
+      aiTrace: state.lastAiTrace,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      isDraft: true
+    };
+    await putRecord(PLAN_STORE, record);
+    await loadUserHistory();
+  }
+
+  async function loadUserHistory() {
+    if (!state.currentUser) return;
+    const records = await getPlansByUser(state.currentUser.username);
+    state.history = records.sort((left, right) => (right.updatedAt || right.createdAt) - (left.updatedAt || left.createdAt));
+    renderWorkspaceSummary();
+    renderHistory();
+  }
+
+  async function loadLatestDraftOrPreset() {
+    const draft = await getRecord(PLAN_STORE, `${state.currentUser.username}-draft`);
+    if (draft) {
+      restorePlanRecord(draft);
+      return;
+    }
+    applyPreset(state.activePreset);
+  }
+
+  function restorePlanRecord(record) {
+    const formData = record.formData;
+    Object.entries(formData).forEach(([key, value]) => {
+      const input = document.getElementById(key);
+      if (!input) return;
+      if (input.type === "checkbox") {
+        input.checked = Boolean(value);
+      } else if (typeof value !== "object") {
+        input.value = value;
+      }
+    });
+    state.schedule = clone(record.schedule || PRESETS[state.activePreset].schedule);
+    state.selectedTags = new Set(record.selectedTags || []);
+    renderTimetable();
+    renderExperienceTags();
+    state.profile = record.profile;
+    state.gapReport = record.gapReport;
+    state.plan = record.plan;
+    state.resources = record.resources;
+    state.lastAiTrace = record.aiTrace || [];
+    els.deadlineValue.textContent = `${formData.deadlineMonths} 个月`;
+    els.energyValue.textContent = `${formData.energyLevel} / 5`;
+    renderAIConsole(state.lastAiTrace);
+    renderDashboard(formData, buildDynamicCareerBlueprint(formData), state.profile, state.gapReport);
+    renderGapAnalysis(buildDynamicCareerBlueprint(formData), state.gapReport);
+    renderPlanner(state.plan);
+    renderResources(state.resources);
+    updateCoachFromInputs();
+  }
+
+  function openDatabase() {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open(DB_NAME, DB_VERSION);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(USER_STORE)) {
+          db.createObjectStore(USER_STORE, { keyPath: "username" });
+        }
+        if (!db.objectStoreNames.contains(PLAN_STORE)) {
+          const store = db.createObjectStore(PLAN_STORE, { keyPath: "id" });
+          store.createIndex("byUser", "userId", { unique: false });
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  function getStore(storeName, mode = "readonly") {
+    return state.db.transaction(storeName, mode).objectStore(storeName);
+  }
+
+  function putRecord(storeName, value) {
+    return new Promise((resolve, reject) => {
+      const request = getStore(storeName, "readwrite").put(value);
+      request.onsuccess = () => resolve(value);
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  function getRecord(storeName, key) {
+    return new Promise((resolve, reject) => {
+      const request = getStore(storeName).get(key);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  async function getUserByUsername(username) {
+    if (!username) return null;
+    return getRecord(USER_STORE, username.toLowerCase());
+  }
+
+  function getPlansByUser(userId) {
+    return new Promise((resolve, reject) => {
+      const store = getStore(PLAN_STORE);
+      const index = store.index("byUser");
+      const request = index.getAll(userId);
+      request.onsuccess = () => resolve(request.result || []);
+      request.onerror = () => reject(request.error);
+    });
   }
 
   function normalizeText(text) {
     return String(text || "").toLowerCase();
+  }
+
+  function slugify(text) {
+    return normalizeText(text)
+      .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "-")
+      .replace(/^-+|-+$/g, "");
   }
 
   function sortEntries(record) {
@@ -1187,14 +1442,26 @@
     return Math.max(min, Math.min(max, value));
   }
 
-  function overlapRatio(left, right) {
-    const leftSet = new Set(left);
-    const rightSet = new Set(right);
-    const intersection = [...leftSet].filter((value) => rightSet.has(value)).length;
-    return intersection / Math.max(leftSet.size, 1);
-  }
-
   function clone(value) {
     return JSON.parse(JSON.stringify(value));
+  }
+
+  function showToast(message) {
+    els.toast.hidden = false;
+    els.toast.textContent = message;
+    clearTimeout(showToast.timer);
+    showToast.timer = setTimeout(() => {
+      els.toast.hidden = true;
+    }, 2600);
+  }
+
+  function formatTime(timestamp) {
+    if (!timestamp) return "暂无";
+    const date = new Date(timestamp);
+    const month = `${date.getMonth() + 1}`.padStart(2, "0");
+    const day = `${date.getDate()}`.padStart(2, "0");
+    const hour = `${date.getHours()}`.padStart(2, "0");
+    const minute = `${date.getMinutes()}`.padStart(2, "0");
+    return `${month}-${day} ${hour}:${minute}`;
   }
 })();
